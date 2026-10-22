@@ -80,30 +80,56 @@ if (!fs.existsSync(destinationFolder)) {
 
 // Copy the script
 try {
-  console.log(`Installing bridge script to ${destinationScript}...`);
+  let installedCount = 0;
 
-  if (isMac) {
-    // On Mac, try direct copy first, then sudo if needed
-    try {
-      fs.copyFileSync(sourceScript, destinationScript);
-    } catch {
-      // If direct copy fails, try with sudo
-      execSync(`sudo cp "${sourceScript}" "${destinationScript}"`, { stdio: 'inherit' });
-    }
-  } else {
-    // On Windows, try direct copy first (works if terminal is already Administrator)
-    try {
-      fs.copyFileSync(sourceScript, destinationScript);
-    } catch {
-      // If permission denied, use PowerShell with elevated privileges (RunAs)
-      const psCommand = `Copy-Item -LiteralPath "${sourceScript}" -Destination "${destinationScript}" -Force`;
-      const encoded = Buffer.from(psCommand, 'utf16le').toString('base64');
-      execSync(`powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-EncodedCommand','${encoded}'"`, { stdio: 'inherit' });
+  // 1. Install to User Profile ScriptUI Panels (no admin required)
+  if (isWindows && process.env.APPDATA) {
+    const aeAppData = path.join(process.env.APPDATA, 'Adobe', 'After Effects');
+    if (fs.existsSync(aeAppData)) {
+      try {
+        const versions = fs.readdirSync(aeAppData);
+        for (const v of versions) {
+          const userPanels = path.join(aeAppData, v, 'Scripts', 'ScriptUI Panels');
+          try {
+            if (!fs.existsSync(userPanels)) {
+              fs.mkdirSync(userPanels, { recursive: true });
+            }
+            fs.copyFileSync(sourceScript, path.join(userPanels, 'mcp-bridge-auto.jsx'));
+            console.log(`Installed to user folder: ${path.join(userPanels, 'mcp-bridge-auto.jsx')}`);
+            installedCount++;
+          } catch (e) {}
+        }
+      } catch (e) {}
     }
   }
 
-  // Verify that the file actually exists
-  if (!fs.existsSync(destinationScript)) {
+  // 2. Also attempt system folder
+  console.log(`Installing bridge script to ${destinationScript}...`);
+  if (isMac) {
+    try {
+      fs.copyFileSync(sourceScript, destinationScript);
+      installedCount++;
+    } catch {
+      try {
+        execSync(`sudo cp "${sourceScript}" "${destinationScript}"`, { stdio: 'inherit' });
+        installedCount++;
+      } catch (e) {}
+    }
+  } else {
+    try {
+      fs.copyFileSync(sourceScript, destinationScript);
+      installedCount++;
+    } catch {
+      try {
+        const psCommand = `Copy-Item -LiteralPath "${sourceScript}" -Destination "${destinationScript}" -Force`;
+        const encoded = Buffer.from(psCommand, 'utf16le').toString('base64');
+        execSync(`powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-EncodedCommand','${encoded}'"`, { stdio: 'inherit' });
+        if (fs.existsSync(destinationScript)) installedCount++;
+      } catch (e) {}
+    }
+  }
+
+  if (installedCount === 0 && !fs.existsSync(destinationScript)) {
     throw new Error(`Installation verification failed: "${destinationScript}" was not found. Please copy the file manually as Administrator.`);
   }
 

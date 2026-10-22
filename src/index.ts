@@ -242,7 +242,13 @@ server.tool(
       "setCompositionProperties",
       "duplicateLayer",
       "deleteLayer",
-      "setLayerMask"
+      "setLayerMask",
+      "setKeyframeEase",
+      "importFootage",
+      "setupCameraRig",
+      "replaceTextInComp",
+      "replaceFootage",
+      "listProjectItems"
     ];
     
     if (!allowedScripts.includes(script)) {
@@ -503,7 +509,17 @@ server.tool(
     ...LayerIdentifierSchema, // Reuse common identifiers
     propertyName: z.string().describe("Name of the property to keyframe (e.g., 'Position', 'Scale', 'Rotation', 'Opacity')."),
     timeInSeconds: z.number().describe("The time (in seconds) for the keyframe."),
-    value: KeyframeValueSchema
+    value: KeyframeValueSchema,
+    ease: z.union([
+      z.enum(["easyEase", "easyEaseIn", "easyEaseOut", "fastEase", "snappy", "smooth", "cinematic", "linear", "hold"]),
+      z.object({
+        easeType: z.string().optional(),
+        speedIn: z.number().optional(),
+        influenceIn: z.number().optional(),
+        speedOut: z.number().optional(),
+        influenceOut: z.number().optional()
+      })
+    ]).optional().describe("Optional easing to apply to the newly created keyframe (e.g. 'snappy', 'easyEase', or custom influence)")
   },
   async (parameters) => {
     try {
@@ -564,6 +580,181 @@ server.tool(
             text: `Error queuing setLayerExpression command: ${String(error)}`
           }
         ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for applying ease to keyframes
+server.tool(
+  "setKeyframeEase",
+  "Apply ease (Easy Ease, Snappy, Smooth, or custom speed & influence) to keyframes of a property in After Effects",
+  {
+    compIndex: z.number().int().positive().optional().describe("1-based index of composition (defaults to active comp)"),
+    layerIndex: z.number().int().positive().describe("1-based index of target layer within composition"),
+    propertyName: z.string().describe("Property name (e.g. 'Position', 'Scale', 'Rotation', 'Opacity')"),
+    keyIndex: z.number().int().positive().optional().describe("1-based index of keyframe to ease (omit to ease all keyframes)"),
+    timeInSeconds: z.number().optional().describe("Time of keyframe in seconds (alternative to keyIndex)"),
+    easeType: z.enum(["easyEase", "easyEaseIn", "easyEaseOut", "fastEase", "snappy", "smooth", "cinematic", "linear", "hold"]).optional().describe("Preset ease type"),
+    speedIn: z.number().optional().describe("Incoming velocity (speed)"),
+    influenceIn: z.number().min(0.1).max(100).optional().describe("Incoming influence % (e.g. 33.33 for standard ease, 75 for snappy modern pop)"),
+    speedOut: z.number().optional().describe("Outgoing velocity (speed)"),
+    influenceOut: z.number().min(0.1).max(100).optional().describe("Outgoing influence % (e.g. 33.33 for standard ease, 75 for snappy modern pop)")
+  },
+  async (parameters) => {
+    try {
+      clearResultsFile();
+      writeCommandFile("setKeyframeEase", parameters);
+      const result = await waitForBridgeResult("setKeyframeEase", 8000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error executing setKeyframeEase: ${String(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for importing footage into project and composition
+server.tool(
+  "importFootage",
+  "Import footage (image, video, audio, or sequence) from disk into After Effects and optionally add it to a composition",
+  {
+    filePath: z.string().describe("Absolute file path to media (PNG, JPG, MP4, MP3, WAV, PSD, AI, etc.)"),
+    compIndex: z.number().int().positive().optional().describe("1-based index of target composition to add footage as layer"),
+    compName: z.string().optional().describe("Target composition name"),
+    startTime: z.number().optional().describe("Start time in seconds for the created layer"),
+    duration: z.number().optional().describe("Duration in seconds for the created layer"),
+    position: z.array(z.number()).optional().describe("Position [x, y] in comp"),
+    scale: z.array(z.number()).optional().describe("Scale [sx, sy] percentage (e.g. [100, 100])"),
+    threeDLayer: z.boolean().optional().describe("Enable 3D on the layer"),
+    sequence: z.boolean().optional().describe("Import as image sequence"),
+    name: z.string().optional().describe("Custom layer name")
+  },
+  async (parameters) => {
+    try {
+      clearResultsFile();
+      writeCommandFile("importFootage", parameters);
+      const result = await waitForBridgeResult("importFootage", 10000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error importing footage: ${String(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for setting up 3D Camera Rig with Null Orbit Controller
+server.tool(
+  "setupCameraRig",
+  "Create a professional 3D Camera Rig with a 3D Null orbit controller, zoom, distance, and optional 3D enablement",
+  {
+    compIndex: z.number().int().positive().optional().describe("Composition index (defaults to active comp)"),
+    compName: z.string().optional().describe("Composition name"),
+    rigName: z.string().optional().describe("Name of the 3D Null controller (default: 'Camera Orbit Rig')"),
+    cameraName: z.string().optional().describe("Name of the Camera layer (default: 'Cinematic Camera')"),
+    zoom: z.number().optional().describe("Camera lens zoom value in pixels (default ~1777 for 50mm)"),
+    distance: z.number().optional().describe("Camera distance along Z-axis from center (default 1500)"),
+    enable3DOnLayers: z.boolean().optional().describe("Automatically enable 3D switch on all other layers in comp")
+  },
+  async (parameters) => {
+    try {
+      clearResultsFile();
+      writeCommandFile("setupCameraRig", parameters);
+      const result = await waitForBridgeResult("setupCameraRig", 8000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error setting up camera rig: ${String(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for replacing text in compositions (template/MoGRT customization)
+server.tool(
+  "replaceTextInComp",
+  "Find and replace text content across layers in a composition (ideal for customizing AE templates & MoGRTs)",
+  {
+    compIndex: z.number().int().positive().optional().describe("Composition index (defaults to active comp)"),
+    compName: z.string().optional().describe("Composition name"),
+    layerName: z.string().optional().describe("Specific text layer name to update"),
+    layerIndex: z.number().int().positive().optional().describe("Specific layer index to update"),
+    findText: z.string().optional().describe("Substring to search for and replace across text layers"),
+    newText: z.string().describe("New text content to insert"),
+    fontSize: z.number().optional().describe("Optional new font size"),
+    color: z.array(z.number()).optional().describe("Optional new text color [r, g, b] with values 0-1")
+  },
+  async (parameters) => {
+    try {
+      clearResultsFile();
+      writeCommandFile("replaceTextInComp", parameters);
+      const result = await waitForBridgeResult("replaceTextInComp", 8000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error replacing text in comp: ${String(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for replacing footage files in the project
+server.tool(
+  "replaceFootage",
+  "Replace an existing footage item or placeholder in the project with a new file from disk (essential for template customization)",
+  {
+    newFilePath: z.string().describe("Absolute path to replacement media file on disk"),
+    footageId: z.number().int().optional().describe("Project item ID of footage to replace"),
+    footageName: z.string().optional().describe("Name of footage item in project panel to replace (e.g. 'Logo Placeholder.png')")
+  },
+  async (parameters) => {
+    try {
+      clearResultsFile();
+      writeCommandFile("replaceFootage", parameters);
+      const result = await waitForBridgeResult("replaceFootage", 8000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error replacing footage: ${String(error)}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Tool for listing all items in the project panel
+server.tool(
+  "listProjectItems",
+  "List all items in the project panel including compositions, footage files, solids, and folders with metadata",
+  {},
+  async () => {
+    try {
+      clearResultsFile();
+      writeCommandFile("listProjectItems", {});
+      const result = await waitForBridgeResult("listProjectItems", 8000, 250);
+      return {
+        content: [{ type: "text", text: result }]
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error listing project items: ${String(error)}` }],
         isError: true
       };
     }

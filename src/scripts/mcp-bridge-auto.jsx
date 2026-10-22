@@ -741,19 +741,101 @@ function batchSetLayerProperties(args) {
 }
 
 /**
- * Sets a keyframe for a specific property on a layer.
- * Indices are 1-based for After Effects collections.
- * @param {number} compIndex - The index of the composition (1-based).
- * @param {number} layerIndex - The index of the layer within the composition (1-based).
- * @param {string} propertyName - The name of the property (e.g., "Position", "Scale", "Rotation", "Opacity").
- * @param {number} timeInSeconds - The time (in seconds) for the keyframe.
- * @param {any} value - The value for the keyframe (e.g., [x, y] for Position, [w, h] for Scale, angle for Rotation, percentage for Opacity).
- * @returns {string} JSON string indicating success or error.
+ * Sets a keyframe for a specific property on a layer. * Indices are 1-based for After Effects collections.
+ * Supports optional ease parameters directly when creating keyframe.
  */
-function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, value) {
+function applyEaseToKey(property, keyIndex, easeOptions) {
+    if (!easeOptions) return;
     try {
-        // Use 1-based indices as per After Effects API
-        var comp = app.project.items[compIndex];
+        var easeType = "easyEase";
+        var speedIn = 0;
+        var influenceIn = 33.33;
+        var speedOut = 0;
+        var influenceOut = 33.33;
+
+        if (typeof easeOptions === "string") {
+            easeType = easeOptions;
+        } else if (typeof easeOptions === "object") {
+            if (easeOptions.easeType) easeType = easeOptions.easeType;
+            if (easeOptions.speedIn !== undefined) speedIn = easeOptions.speedIn;
+            if (easeOptions.influenceIn !== undefined) influenceIn = easeOptions.influenceIn;
+            if (easeOptions.speedOut !== undefined) speedOut = easeOptions.speedOut;
+            if (easeOptions.influenceOut !== undefined) influenceOut = easeOptions.influenceOut;
+        }
+
+        if (easeType === "linear") {
+            if (typeof KeyframeInterpolationType !== "undefined") {
+                property.setInterpolationTypeAtKey(keyIndex, KeyframeInterpolationType.LINEAR, KeyframeInterpolationType.LINEAR);
+            }
+            return;
+        }
+
+        if (easeType === "hold") {
+            if (typeof KeyframeInterpolationType !== "undefined") {
+                property.setInterpolationTypeAtKey(keyIndex, KeyframeInterpolationType.HOLD, KeyframeInterpolationType.HOLD);
+            }
+            return;
+        }
+
+        if (easeType === "fastEase" || easeType === "snappy") {
+            influenceIn = 75;
+            influenceOut = 75;
+        } else if (easeType === "smooth" || easeType === "cinematic") {
+            influenceIn = 65;
+            influenceOut = 65;
+        }
+
+        influenceIn = Math.max(0.1, Math.min(100, parseFloat(influenceIn)));
+        influenceOut = Math.max(0.1, Math.min(100, parseFloat(influenceOut)));
+        speedIn = parseFloat(speedIn) || 0;
+        speedOut = parseFloat(speedOut) || 0;
+
+        if (typeof KeyframeInterpolationType !== "undefined") {
+            try {
+                property.setInterpolationTypeAtKey(keyIndex, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER);
+            } catch(intErr) {}
+        }
+
+        var easeIn = new KeyframeEase(speedIn, influenceIn);
+        var easeOut = new KeyframeEase(speedOut, influenceOut);
+
+        var dim = 1;
+        try {
+            var val = property.valueAtTime(property.keyTime(keyIndex), false);
+            if (val instanceof Array) dim = val.length;
+        } catch(e) {}
+
+        var inArr = [];
+        var outArr = [];
+        for (var d = 0; d < dim; d++) {
+            inArr.push(easeIn);
+            outArr.push(easeOut);
+        }
+
+        property.setTemporalEaseAtKey(keyIndex, inArr, outArr);
+    } catch(err) {
+        logToPanel("Ease warning: " + err.toString());
+    }
+}
+
+function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, value, ease) {
+    try {
+        if (typeof compIndex === "object" && compIndex !== null) {
+            var args = compIndex;
+            layerIndex = args.layerIndex;
+            propertyName = args.propertyName;
+            timeInSeconds = args.timeInSeconds;
+            value = args.value;
+            ease = args.ease;
+            compIndex = args.compIndex;
+        }
+
+        var comp = null;
+        if (compIndex) {
+            comp = app.project.items[compIndex];
+        } else if (app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
         if (!comp || !(comp instanceof CompItem)) {
             return JSON.stringify({ success: false, message: "Composition not found at index " + compIndex });
         }
@@ -763,41 +845,430 @@ function setLayerKeyframe(compIndex, layerIndex, propertyName, timeInSeconds, va
         }
 
         var transformGroup = layer.property("Transform");
-        if (!transformGroup) {
-             return JSON.stringify({ success: false, message: "Transform properties not found for layer '" + layer.name + "' (type: " + layer.matchName + ")." });
+        var property = null;
+        if (transformGroup && transformGroup.property(propertyName)) {
+            property = transformGroup.property(propertyName);
+        } else if (layer.property(propertyName)) {
+            property = layer.property(propertyName);
+        } else if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
+            property = layer.property("Effects").property(propertyName);
+        } else if (layer.property("Text") && layer.property("Text").property(propertyName)) {
+            property = layer.property("Text").property(propertyName);
         }
 
-        var property = transformGroup.property(propertyName);
         if (!property) {
-            // Check other common property groups if not in Transform
-             if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
-                 property = layer.property("Effects").property(propertyName);
-             } else if (layer.property("Text") && layer.property("Text").property(propertyName)) {
-                 property = layer.property("Text").property(propertyName);
-            } // Add more groups if needed (e.g., Masks, Shapes)
-
-            if (!property) {
-                 return JSON.stringify({ success: false, message: "Property '" + propertyName + "' not found on layer '" + layer.name + "'." });
-            }
+            return JSON.stringify({ success: false, message: "Property '" + propertyName + "' not found on layer '" + layer.name + "'." });
         }
 
-
-        // Ensure the property can be keyframed
         if (!property.canVaryOverTime) {
-             return JSON.stringify({ success: false, message: "Property '" + propertyName + "' cannot be keyframed." });
+            return JSON.stringify({ success: false, message: "Property '" + propertyName + "' cannot be keyframed." });
         }
 
-        // Make sure the property is enabled for keyframing
         if (property.numKeys === 0 && !property.isTimeVarying) {
-             property.setValueAtTime(comp.time, property.value); // Set initial keyframe if none exist
+            property.setValueAtTime(comp.time, property.value);
         }
-
 
         property.setValueAtTime(timeInSeconds, value);
 
-        return JSON.stringify({ success: true, message: "Keyframe set for '" + propertyName + "' on layer '" + layer.name + "' at " + timeInSeconds + "s." });
+        var keyIdx = property.nearestKeyIndex(timeInSeconds);
+        if (ease && keyIdx > 0) {
+            applyEaseToKey(property, keyIdx, ease);
+        }
+
+        return JSON.stringify({ 
+            success: true, 
+            message: "Keyframe set for '" + propertyName + "' on layer '" + layer.name + "' at " + timeInSeconds + "s" + (ease ? " with ease applied." : "."),
+            keyIndex: keyIdx
+        });
     } catch (e) {
         return JSON.stringify({ success: false, message: "Error setting keyframe: " + e.toString() + " (Line: " + e.line + ")" });
+    }
+}
+
+/**
+ * Apply ease to existing keyframes (Easy Ease, Snappy, Smooth, or custom velocity & influence)
+ */
+function setKeyframeEase(args) {
+    try {
+        var compIndex = args.compIndex;
+        var layerIndex = args.layerIndex;
+        var propertyName = args.propertyName;
+        var comp = null;
+        if (compIndex) {
+            comp = app.project.items[compIndex];
+        } else if (app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
+        if (!comp || !(comp instanceof CompItem)) {
+            return JSON.stringify({ status: "error", message: "Composition not found" });
+        }
+        var layer = comp.layers[layerIndex];
+        if (!layer) {
+            return JSON.stringify({ status: "error", message: "Layer not found at index " + layerIndex });
+        }
+
+        var property = null;
+        if (layer.property("Transform") && layer.property("Transform").property(propertyName)) {
+            property = layer.property("Transform").property(propertyName);
+        } else if (layer.property(propertyName)) {
+            property = layer.property(propertyName);
+        } else if (layer.property("Effects") && layer.property("Effects").property(propertyName)) {
+            property = layer.property("Effects").property(propertyName);
+        }
+        if (!property) {
+            return JSON.stringify({ status: "error", message: "Property '" + propertyName + "' not found." });
+        }
+        if (property.numKeys === 0) {
+            return JSON.stringify({ status: "error", message: "Property has no keyframes to ease." });
+        }
+
+        var targetKeys = [];
+        if (args.keyIndex !== undefined && args.keyIndex !== null) {
+            targetKeys.push(parseInt(args.keyIndex));
+        } else if (args.timeInSeconds !== undefined && args.timeInSeconds !== null) {
+            var kIdx = property.nearestKeyIndex(parseFloat(args.timeInSeconds));
+            if (kIdx > 0) targetKeys.push(kIdx);
+        } else {
+            for (var k = 1; k <= property.numKeys; k++) {
+                targetKeys.push(k);
+            }
+        }
+
+        for (var i = 0; i < targetKeys.length; i++) {
+            applyEaseToKey(property, targetKeys[i], args);
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Ease applied to " + targetKeys.length + " keyframe(s) on '" + propertyName + "'.",
+            keysAffected: targetKeys
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+/**
+ * Import any external media file (PNG, JPG, MP4, MP3, WAV, PSD, AI, etc.) into project & composition
+ */
+function importFootage(args) {
+    try {
+        var filePath = args.filePath;
+        if (!filePath) {
+            return JSON.stringify({ status: "error", message: "filePath parameter is required" });
+        }
+        var file = new File(filePath);
+        if (!file.exists) {
+            return JSON.stringify({ status: "error", message: "File does not exist: " + filePath });
+        }
+
+        var importOptions = new ImportOptions(file);
+        if (args.sequence === true) {
+            importOptions.sequence = true;
+        }
+        var footageItem = app.project.importFile(importOptions);
+
+        var comp = null;
+        if (args.compIndex) {
+            comp = app.project.items[args.compIndex];
+        } else if (args.compName) {
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var it = app.project.item(i);
+                if (it instanceof CompItem && it.name === args.compName) {
+                    comp = it;
+                    break;
+                }
+            }
+        } else if (app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
+
+        var layerResult = null;
+        if (comp && comp instanceof CompItem) {
+            var layer = comp.layers.add(footageItem);
+            if (args.name) {
+                layer.name = args.name;
+            }
+            if (args.startTime !== undefined && args.startTime !== null) {
+                layer.startTime = parseFloat(args.startTime);
+            }
+            if (args.duration !== undefined && args.duration !== null) {
+                layer.outPoint = layer.startTime + parseFloat(args.duration);
+            }
+            if (args.position && args.position instanceof Array) {
+                layer.property("Position").setValue(args.position);
+            }
+            if (args.scale && args.scale instanceof Array) {
+                layer.property("Scale").setValue(args.scale);
+            }
+            if (args.threeDLayer === true) {
+                layer.threeDLayer = true;
+            }
+            layerResult = {
+                index: layer.index,
+                name: layer.name,
+                width: layer.width,
+                height: layer.height,
+                startTime: layer.startTime,
+                inPoint: layer.inPoint,
+                outPoint: layer.outPoint
+            };
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Footage imported successfully" + (layerResult ? " and added to comp '" + comp.name + "'" : ""),
+            footage: {
+                id: footageItem.id,
+                name: footageItem.name,
+                width: footageItem.width,
+                height: footageItem.height,
+                duration: footageItem.duration,
+                pixelAspect: footageItem.pixelAspect
+            },
+            layer: layerResult
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+/**
+ * Setup a professional 3D Camera Rig with 3D Null orbit controller and parallax depth
+ */
+function setupCameraRig(args) {
+    try {
+        var compName = args.compName || "";
+        var comp = null;
+        if (args.compIndex) {
+            comp = app.project.items[args.compIndex];
+        } else if (compName) {
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var it = app.project.item(i);
+                if (it instanceof CompItem && it.name === compName) { comp = it; break; }
+            }
+        }
+        if (!comp && app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
+        if (!comp) {
+            throw new Error("No target composition found.");
+        }
+
+        var rigName = args.rigName || "Camera Orbit Rig";
+        var cameraName = args.cameraName || "Cinematic Camera";
+        var centerPos = [comp.width / 2, comp.height / 2, 0];
+        
+        var nullLayer = comp.layers.addNull();
+        nullLayer.name = rigName;
+        nullLayer.threeDLayer = true;
+        nullLayer.property("Position").setValue(centerPos);
+
+        var cameraLayer = comp.layers.addCamera(cameraName, [comp.width / 2, comp.height / 2]);
+        var zoom = args.zoom || (comp.width > comp.height ? comp.width * 1.5 : 1777.78);
+        cameraLayer.property("Camera Options").property("Zoom").setValue(zoom);
+        
+        var cameraDistance = args.distance || 1500;
+        cameraLayer.property("Position").setValue([comp.width / 2, comp.height / 2, -cameraDistance]);
+        if (cameraLayer.property("Point of Interest")) {
+            cameraLayer.property("Point of Interest").setValue([comp.width / 2, comp.height / 2, 0]);
+        }
+
+        cameraLayer.parent = nullLayer;
+
+        if (args.enable3DOnLayers === true) {
+            for (var l = 1; l <= comp.numLayers; l++) {
+                var cur = comp.layer(l);
+                if (cur !== cameraLayer && cur !== nullLayer && cur.canSetTimeRemapEnabled !== undefined) {
+                    try { cur.threeDLayer = true; } catch(err) {}
+                }
+            }
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "3D Camera Rig created with Null Controller",
+            rig: {
+                controllerLayerIndex: nullLayer.index,
+                controllerName: nullLayer.name,
+                cameraLayerIndex: cameraLayer.index,
+                cameraName: cameraLayer.name,
+                zoom: zoom,
+                distance: cameraDistance
+            }
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+/**
+ * Replace text on text layers in a composition (ideal for customizing AE templates & MoGRTs)
+ */
+function replaceTextInComp(args) {
+    try {
+        var comp = null;
+        if (args.compIndex) {
+            comp = app.project.items[args.compIndex];
+        } else if (args.compName) {
+            for (var i = 1; i <= app.project.numItems; i++) {
+                var it = app.project.item(i);
+                if (it instanceof CompItem && it.name === args.compName) { comp = it; break; }
+            }
+        }
+        if (!comp && app.project.activeItem instanceof CompItem) {
+            comp = app.project.activeItem;
+        }
+        if (!comp) {
+            throw new Error("No target composition found.");
+        }
+
+        var targetLayerName = args.layerName;
+        var targetLayerIndex = args.layerIndex;
+        var findText = args.findText;
+        var newText = args.newText;
+        if (newText === undefined || newText === null) {
+            throw new Error("newText parameter is required.");
+        }
+
+        var modifiedCount = 0;
+        var modifiedLayers = [];
+
+        for (var l = 1; l <= comp.numLayers; l++) {
+            var layer = comp.layer(l);
+            var isTarget = false;
+            if (targetLayerIndex && layer.index === targetLayerIndex) isTarget = true;
+            if (targetLayerName && layer.name.toLowerCase() === targetLayerName.toLowerCase()) isTarget = true;
+
+            var sourceTextProp = layer.property("Source Text");
+            if (!sourceTextProp && layer.property("Text")) {
+                sourceTextProp = layer.property("Text").property("Source Text");
+            }
+
+            if (sourceTextProp) {
+                var textDoc = sourceTextProp.value;
+                var curText = textDoc.text;
+
+                if (findText) {
+                    if (curText.indexOf(findText) !== -1) {
+                        textDoc.text = curText.replace(new RegExp(findText, "g"), newText);
+                        sourceTextProp.setValue(textDoc);
+                        modifiedCount++;
+                        modifiedLayers.push({ index: layer.index, name: layer.name, oldText: curText, newText: textDoc.text });
+                    }
+                } else if (isTarget) {
+                    textDoc.text = newText;
+                    if (args.fontSize) textDoc.fontSize = parseFloat(args.fontSize);
+                    if (args.color) textDoc.fillColor = args.color;
+                    sourceTextProp.setValue(textDoc);
+                    modifiedCount++;
+                    modifiedLayers.push({ index: layer.index, name: layer.name, oldText: curText, newText: newText });
+                }
+            }
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Replaced text in " + modifiedCount + " layer(s).",
+            compName: comp.name,
+            modifiedCount: modifiedCount,
+            layers: modifiedLayers
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+/**
+ * Replace a footage item in project with a new file from disk (Envato / template asset swap)
+ */
+function replaceFootage(args) {
+    try {
+        var filePath = args.newFilePath;
+        if (!filePath) {
+            throw new Error("newFilePath is required.");
+        }
+        var newFile = new File(filePath);
+        if (!newFile.exists) {
+            throw new Error("File not found: " + filePath);
+        }
+
+        var targetItem = null;
+        if (args.footageId) {
+            for (var i = 1; i <= app.project.numItems; i++) {
+                if (app.project.item(i).id === args.footageId) {
+                    targetItem = app.project.item(i);
+                    break;
+                }
+            }
+        } else if (args.footageName) {
+            for (var j = 1; j <= app.project.numItems; j++) {
+                var it = app.project.item(j);
+                if (it instanceof FootageItem && it.name.toLowerCase() === args.footageName.toLowerCase()) {
+                    targetItem = it;
+                    break;
+                }
+            }
+        }
+
+        if (!targetItem || !(targetItem instanceof FootageItem)) {
+            throw new Error("Footage item not found in project.");
+        }
+
+        targetItem.replace(newFile);
+
+        return JSON.stringify({
+            status: "success",
+            message: "Footage '" + targetItem.name + "' successfully replaced with file: " + filePath,
+            footage: {
+                id: targetItem.id,
+                name: targetItem.name,
+                width: targetItem.width,
+                height: targetItem.height
+            }
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+/**
+ * List all items in the project panel including comps, footage, solids, and folders
+ */
+function listProjectItems() {
+    try {
+        var items = [];
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            var type = "unknown";
+            if (item instanceof CompItem) type = "composition";
+            else if (item instanceof FootageItem) type = (item.mainSource instanceof SolidSource) ? "solid" : "footage";
+            else if (item instanceof FolderItem) type = "folder";
+
+            var itemObj = {
+                index: i,
+                id: item.id,
+                name: item.name,
+                type: type,
+                typeName: item.typeName
+            };
+            if (item instanceof CompItem || item instanceof FootageItem) {
+                itemObj.width = item.width;
+                itemObj.height = item.height;
+                itemObj.duration = item.duration;
+            }
+            if (item instanceof FootageItem && item.file) {
+                itemObj.filePath = item.file.fsName;
+            }
+            items.push(itemObj);
+        }
+        return JSON.stringify({
+            status: "success",
+            totalItems: app.project.numItems,
+            items: items
+        }, null, 2);
+    } catch (e) {
+        return JSON.stringify({ status: "error", message: e.toString() }, null, 2);
     }
 }
 
@@ -1549,8 +2020,38 @@ function executeCommand(command, args) {
                 break;
             case "setLayerKeyframe":
                 logToPanel("Calling setLayerKeyframe function...");
-                result = setLayerKeyframe(args.compIndex, args.layerIndex, args.propertyName, args.timeInSeconds, args.value);
+                result = setLayerKeyframe(args.compIndex, args.layerIndex, args.propertyName, args.timeInSeconds, args.value, args.ease);
                 logToPanel("Returned from setLayerKeyframe.");
+                break;
+            case "setKeyframeEase":
+                logToPanel("Calling setKeyframeEase function...");
+                result = setKeyframeEase(args);
+                logToPanel("Returned from setKeyframeEase.");
+                break;
+            case "importFootage":
+                logToPanel("Calling importFootage function...");
+                result = importFootage(args);
+                logToPanel("Returned from importFootage.");
+                break;
+            case "setupCameraRig":
+                logToPanel("Calling setupCameraRig function...");
+                result = setupCameraRig(args);
+                logToPanel("Returned from setupCameraRig.");
+                break;
+            case "replaceTextInComp":
+                logToPanel("Calling replaceTextInComp function...");
+                result = replaceTextInComp(args);
+                logToPanel("Returned from replaceTextInComp.");
+                break;
+            case "replaceFootage":
+                logToPanel("Calling replaceFootage function...");
+                result = replaceFootage(args);
+                logToPanel("Returned from replaceFootage.");
+                break;
+            case "listProjectItems":
+                logToPanel("Calling listProjectItems function...");
+                result = listProjectItems();
+                logToPanel("Returned from listProjectItems.");
                 break;
             case "setLayerExpression":
                 logToPanel("Calling setLayerExpression function...");
