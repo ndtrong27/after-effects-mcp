@@ -1317,23 +1317,30 @@ autoRunCheckbox.value = true;
 var checkInterval = 2000;
 var isChecking = false;
 
-// Command file path - use Documents folder for reliable access
-function getCommandFilePath() {
-    var userFolder = Folder.myDocuments;
-    var bridgeFolder = new Folder(userFolder.fsName + "/ae-mcp-bridge");
+// Bridge folder path - use Public folder on Windows or /tmp on other platforms for reliable ASCII path without OneDrive/Unicode issues
+function getBridgeFolder() {
+    var bridgeDir;
+    if ($.os.indexOf("Windows") !== -1) {
+        bridgeDir = "C:/Users/Public/ae-mcp-bridge";
+    } else {
+        bridgeDir = "/tmp/ae-mcp-bridge";
+    }
+    var bridgeFolder = new Folder(bridgeDir);
     if (!bridgeFolder.exists) {
         bridgeFolder.create();
     }
+    return bridgeFolder;
+}
+
+// Command file path
+function getCommandFilePath() {
+    var bridgeFolder = getBridgeFolder();
     return bridgeFolder.fsName + "/ae_command.json";
 }
 
-// Result file path - use Documents folder for reliable access
+// Result file path
 function getResultFilePath() {
-    var userFolder = Folder.myDocuments;
-    var bridgeFolder = new Folder(userFolder.fsName + "/ae-mcp-bridge");
-    if (!bridgeFolder.exists) {
-        bridgeFolder.create();
-    }
+    var bridgeFolder = getBridgeFolder();
     return bridgeFolder.fsName + "/ae_mcp_result.json";
 }
 
@@ -1708,8 +1715,11 @@ function updateCommandStatus(status) {
 
 // Log message to panel
 function logToPanel(message) {
-    var timestamp = new Date().toLocaleTimeString();
-    logText.text = timestamp + ": " + message + "\n" + logText.text;
+    try {
+        var timestamp = new Date().toLocaleTimeString();
+        logText.text = timestamp + ": " + message + "\n" + logText.text;
+        panel.update();
+    } catch (e) {}
 }
 
 // Check for new commands
@@ -1719,29 +1729,41 @@ function checkForCommands() {
     isChecking = true;
     
     try {
-        var commandFile = new File(getCommandFilePath());
-        if (commandFile.exists) {
-            commandFile.open("r");
-            var content = commandFile.read();
-            commandFile.close();
-            
-            if (content) {
-                var commandData = (typeof JSON !== "undefined" && JSON.parse)
-                    ? JSON.parse(content)
-                    : eval("(" + content + ")");
+        var candidateFiles = [
+            new File(getCommandFilePath())
+        ];
+        try {
+            var myDocFile = new File(Folder.myDocuments.fsName + "/ae-mcp-bridge/ae_command.json");
+            candidateFiles.push(myDocFile);
+        } catch (e) {}
+
+        for (var i = 0; i < candidateFiles.length; i++) {
+            var commandFile = candidateFiles[i];
+            if (commandFile.exists) {
+                commandFile.open("r");
+                var content = commandFile.read();
+                commandFile.close();
                 
-                // Only execute pending commands
-                if (commandData.status === "pending") {
-                    // Update status to running
-                    updateCommandStatus("running");
+                if (content) {
+                    var commandData = (typeof JSON !== "undefined" && JSON.parse)
+                        ? JSON.parse(content)
+                        : eval("(" + content + ")");
                     
-                    // Execute the command
-                    executeCommand(commandData.command, commandData.args || {});
+                    // Only execute pending commands
+                    if (commandData && commandData.status === "pending") {
+                        logToPanel("Found command: " + commandData.command);
+                        // Update status to running
+                        updateCommandStatus("running");
+                        
+                        // Execute the command
+                        executeCommand(commandData.command, commandData.args || {});
+                        break;
+                    }
                 }
             }
         }
     } catch (e) {
-        logToPanel("Error checking for commands: " + e.toString());
+        logToPanel("Error checking commands: " + e.toString());
     }
     
     isChecking = false;
@@ -1755,7 +1777,13 @@ function startCommandChecker() {
 // Add manual check button
 var checkButton = panel.add("button", undefined, "Check for Commands Now");
 checkButton.onClick = function() {
-    logToPanel("Manually checking for commands");
+    logToPanel("Checking for commands...");
+    var primaryFile = new File(getCommandFilePath());
+    if (primaryFile.exists) {
+        logToPanel("File found at: " + primaryFile.fsName);
+    } else {
+        logToPanel("File not found at: " + primaryFile.fsName);
+    }
     checkForCommands();
 };
 

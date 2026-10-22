@@ -91,11 +91,20 @@ try {
       execSync(`sudo cp "${sourceScript}" "${destinationScript}"`, { stdio: 'inherit' });
     }
   } else {
-    // Try to use PowerShell with elevated privileges on Windows
-    const command = `
-      Start-Process PowerShell -Verb RunAs -ArgumentList "-Command Copy-Item -Path '${sourceScript.replace(/\\/g, '\\\\')}' -Destination '${destinationScript.replace(/\\/g, '\\\\')}' -Force"
-    `;
-    execSync(`powershell -Command "${command}"`, { stdio: 'inherit' });
+    // On Windows, try direct copy first (works if terminal is already Administrator)
+    try {
+      fs.copyFileSync(sourceScript, destinationScript);
+    } catch {
+      // If permission denied, use PowerShell with elevated privileges (RunAs)
+      const psCommand = `Copy-Item -LiteralPath "${sourceScript}" -Destination "${destinationScript}" -Force`;
+      const encoded = Buffer.from(psCommand, 'utf16le').toString('base64');
+      execSync(`powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-EncodedCommand','${encoded}'"`, { stdio: 'inherit' });
+    }
+  }
+
+  // Verify that the file actually exists
+  if (!fs.existsSync(destinationScript)) {
+    throw new Error(`Installation verification failed: "${destinationScript}" was not found. Please copy the file manually as Administrator.`);
   }
 
   console.log('Bridge script installed successfully!');

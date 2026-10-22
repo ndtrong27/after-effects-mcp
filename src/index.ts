@@ -21,40 +21,82 @@ const __dirname = path.dirname(__filename);
 const SCRIPTS_DIR = path.join(__dirname, "scripts");
 const TEMP_DIR = path.join(__dirname, "temp");
 
-// Get the correct directory for AE bridge files
-// Use ~/Documents/ae-mcp-bridge for reliable cross-process access
-function getAETempDir(): string {
-  const homeDir = os.homedir();
-  const bridgeDir = path.join(homeDir, 'Documents', 'ae-mcp-bridge');
-  // Ensure the directory exists
-  if (!fs.existsSync(bridgeDir)) {
-    fs.mkdirSync(bridgeDir, { recursive: true });
+// Get all possible directories for AE bridge files
+// Searches Public folder, user Documents, and OneDrive Documents to ensure
+// compatibility regardless of Windows locale, OneDrive redirection, or custom setups.
+function getAllAETempDirs(): string[] {
+  const dirs: string[] = [];
+  
+  if (process.platform === 'win32') {
+    dirs.push(path.join(process.env.PUBLIC || 'C:\\Users\\Public', 'ae-mcp-bridge'));
+    dirs.push(path.join(os.homedir(), 'Documents', 'ae-mcp-bridge'));
+
+    const oneDriveRoots = [
+      process.env.OneDrive,
+      process.env.OneDriveConsumer,
+      process.env.OneDriveCommercial,
+      path.join(os.homedir(), 'OneDrive')
+    ].filter(Boolean) as string[];
+
+    for (const od of oneDriveRoots) {
+      if (fs.existsSync(od)) {
+        try {
+          const entries = fs.readdirSync(od, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isDirectory()) {
+              dirs.push(path.join(od, entry.name, 'ae-mcp-bridge'));
+            }
+          }
+        } catch {}
+      }
+    }
+  } else {
+    dirs.push(path.join('/tmp', 'ae-mcp-bridge'));
+    dirs.push(path.join(os.homedir(), 'Documents', 'ae-mcp-bridge'));
   }
-  return bridgeDir;
+
+  // Ensure directories exist where parent exists
+  for (const dir of dirs) {
+    try {
+      const parent = path.dirname(dir);
+      if (fs.existsSync(parent) && !fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    } catch {}
+  }
+
+  return [...new Set(dirs)].filter(d => fs.existsSync(d));
 }
 
-// Headless CLI execution has been removed. All interactions are routed through the Bridge panel.
+function getAETempDir(): string {
+  const dirs = getAllAETempDirs();
+  return dirs[0] || path.join(process.platform === 'win32' ? (process.env.PUBLIC || 'C:\\Users\\Public') : '/tmp', 'ae-mcp-bridge');
+}
 
 // Helper function to read results from After Effects temp file
 function readResultsFromTempFile(): string {
   try {
-    const tempFilePath = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Add debugging info
-    console.error(`Checking for results at: ${tempFilePath}`);
-    
-    if (fs.existsSync(tempFilePath)) {
-      // Get file stats to check modification time
-      const stats = fs.statSync(tempFilePath);
-      console.error(`Result file exists, last modified: ${stats.mtime.toISOString()}`);
+    const dirs = getAllAETempDirs();
+    let bestFile: string | null = null;
+    let bestMtime = 0;
+
+    for (const dir of dirs) {
+      const testPath = path.join(dir, 'ae_mcp_result.json');
+      if (fs.existsSync(testPath)) {
+        const stats = fs.statSync(testPath);
+        if (stats.mtimeMs > bestMtime) {
+          bestMtime = stats.mtimeMs;
+          bestFile = testPath;
+        }
+      }
+    }
+
+    if (bestFile) {
+      const stats = fs.statSync(bestFile);
+      const content = fs.readFileSync(bestFile, 'utf8');
       
-      const content = fs.readFileSync(tempFilePath, 'utf8');
-      console.error(`Result file content length: ${content.length} bytes`);
-      
-      // If the result file is older than 30 seconds, warn the user
       const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
       if (stats.mtime < thirtySecondsAgo) {
-        console.error(`WARNING: Result file is older than 30 seconds. After Effects may not be updating results.`);
         return JSON.stringify({ 
           warning: "Result file appears to be stale (not recently updated).",
           message: "This could indicate After Effects is not properly writing results or the MCP Bridge Auto panel isn't running.",
@@ -62,10 +104,8 @@ function readResultsFromTempFile(): string {
           originalContent: content
         });
       }
-      
       return content;
     } else {
-      console.error(`Result file not found at: ${tempFilePath}`);
       return JSON.stringify({ error: "No results file found. Please run a script in After Effects first." });
     }
   } catch (error) {
@@ -75,28 +115,28 @@ function readResultsFromTempFile(): string {
 }
 
 // Helper to wait for a fresh result produced by a specific command
-async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number = 5000, pollMs: number = 250): Promise<string> {
+async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number = 8000, pollMs: number = 250): Promise<string> {
   const start = Date.now();
-  const resultPath = path.join(getAETempDir(), 'ae_mcp_result.json');
-  let lastSize = -1;
+  const dirs = getAllAETempDirs();
 
   while (Date.now() - start < timeoutMs) {
-    if (fs.existsSync(resultPath)) {
-      try {
-        const content = fs.readFileSync(resultPath, 'utf8');
-        if (content && content.length > 0 && content.length !== lastSize) {
-          lastSize = content.length;
-          try {
-            const parsed = JSON.parse(content);
-            if (!expectedCommand || parsed._commandExecuted === expectedCommand) {
-              return content;
+    for (const dir of dirs) {
+      const resultPath = path.join(dir, 'ae_mcp_result.json');
+      if (fs.existsSync(resultPath)) {
+        try {
+          const stats = fs.statSync(resultPath);
+          if (stats.mtimeMs >= start - 1000) {
+            const content = fs.readFileSync(resultPath, 'utf8');
+            if (content && content.length > 0) {
+              try {
+                const parsed = JSON.parse(content);
+                if (parsed.status !== "waiting" && (!expectedCommand || parsed._commandExecuted === expectedCommand)) {
+                  return content;
+                }
+              } catch {}
             }
-          } catch {
-            // not JSON yet; continue polling
           }
-        }
-      } catch {
-        // transient read error; continue polling
+        } catch {}
       }
     }
     await new Promise(r => setTimeout(r, pollMs));
@@ -107,15 +147,24 @@ async function waitForBridgeResult(expectedCommand?: string, timeoutMs: number =
 // Helper function to write command to file
 function writeCommandFile(command: string, args: Record<string, any> = {}): void {
   try {
-    const commandFile = path.join(getAETempDir(), 'ae_command.json');
+    const dirs = getAllAETempDirs();
     const commandData = {
       command,
       args,
       timestamp: new Date().toISOString(),
       status: "pending"  // pending, running, completed, error
     };
-    fs.writeFileSync(commandFile, JSON.stringify(commandData, null, 2));
-    console.error(`Command "${command}" written to ${commandFile}`);
+    const content = JSON.stringify(commandData, null, 2);
+
+    for (const dir of dirs) {
+      try {
+        const commandFile = path.join(dir, 'ae_command.json');
+        fs.writeFileSync(commandFile, content);
+        console.error(`Command "${command}" written to ${commandFile}`);
+      } catch (err) {
+        console.error(`Failed to write command to ${dir}:`, err);
+      }
+    }
   } catch (error) {
     console.error("Error writing command file:", error);
   }
@@ -124,17 +173,20 @@ function writeCommandFile(command: string, args: Record<string, any> = {}): void
 // Helper function to clear the results file to avoid stale cache
 function clearResultsFile(): void {
   try {
-    const resultFile = path.join(getAETempDir(), 'ae_mcp_result.json');
-    
-    // Write a placeholder message to indicate the file is being reset
+    const dirs = getAllAETempDirs();
     const resetData = {
       status: "waiting",
       message: "Waiting for new result from After Effects...",
       timestamp: new Date().toISOString()
     };
-    
-    fs.writeFileSync(resultFile, JSON.stringify(resetData, null, 2));
-    console.error(`Results file cleared at ${resultFile}`);
+    const content = JSON.stringify(resetData, null, 2);
+
+    for (const dir of dirs) {
+      try {
+        const resultFile = path.join(dir, 'ae_mcp_result.json');
+        fs.writeFileSync(resultFile, content);
+      } catch {}
+    }
   } catch (error) {
     console.error("Error clearing results file:", error);
   }
