@@ -1705,6 +1705,88 @@ function bridgeTestEffects(args) {
     }
 }
 
+// --- convertVectorToShape: Create Shapes from Vector Layer (EPS, AI, PDF, SVG) ---
+function convertVectorToShape(args) {
+    try {
+        var compName = args.compName || "";
+        var comp = null;
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem && item.name === compName) { comp = item; break; }
+        }
+        if (!comp && app.project.activeItem instanceof CompItem) { comp = app.project.activeItem; }
+        if (!comp) throw new Error("Composition not found: " + compName);
+
+        var layer = null;
+        if (args.layerIndex !== undefined && args.layerIndex !== null) {
+            layer = comp.layer(args.layerIndex);
+        } else if (args.layerName) {
+            for (var j = 1; j <= comp.numLayers; j++) {
+                if (comp.layer(j).name === args.layerName) { layer = comp.layer(j); break; }
+            }
+        }
+        if (!layer) throw new Error("Vector layer not found: " + (args.layerName || args.layerIndex));
+
+        // Deselect all layers in comp, then select target layer
+        for (var k = 1; k <= comp.numLayers; k++) {
+            comp.layer(k).selected = false;
+        }
+        layer.selected = true;
+
+        // Execute menu command: "Create Shapes from Vector Layer"
+        var cmdId = app.findMenuCommandId("Create Shapes from Vector Layer");
+        if (!cmdId || cmdId === 0) cmdId = 3973; // Standard ID in English AE
+        app.executeCommand(cmdId);
+
+        // Find newly created shape layer (it's selected or at layer.index - 1)
+        var newShapeLayer = comp.selectedLayers.length > 0 ? comp.selectedLayers[0] : comp.layer(1);
+        
+        var groups = [];
+        if (newShapeLayer && newShapeLayer.property("Contents")) {
+            var contents = newShapeLayer.property("Contents");
+            for (var g = 1; g <= contents.numProperties; g++) {
+                groups.push(contents.property(g).name);
+            }
+        }
+
+        return JSON.stringify({
+            status: "success",
+            message: "Converted vector layer to shape layer successfully",
+            originalLayer: layer.name,
+            shapeLayerName: newShapeLayer ? newShapeLayer.name : "Unknown",
+            shapeLayerIndex: newShapeLayer ? newShapeLayer.index : 1,
+            numShapeGroups: groups.length,
+            groups: groups.slice(0, 30)
+        }, null, 2);
+    } catch(e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
+// --- runScript: Execute arbitrary ExtendScript dynamically ---
+function runScript(args) {
+    try {
+        var scriptCode = args.script || "";
+        if (args.scriptFile) {
+            var sf = new File(args.scriptFile);
+            if (sf.exists) {
+                sf.open("r");
+                scriptCode = sf.read();
+                sf.close();
+            } else {
+                throw new Error("Script file not found: " + args.scriptFile);
+            }
+        }
+        var evalResult = eval(scriptCode);
+        return JSON.stringify({
+            status: "success",
+            result: evalResult !== undefined ? String(evalResult) : "Executed successfully"
+        }, null, 2);
+    } catch(e) {
+        return JSON.stringify({ status: "error", message: e.toString() + " (Line: " + e.line + ")" }, null, 2);
+    }
+}
+
 // JSON polyfill for ExtendScript (when JSON is undefined)
 if (typeof JSON === "undefined") {
     JSON = {};
@@ -2103,6 +2185,16 @@ function executeCommand(command, args) {
                 result = setLayerMask(args);
                 logToPanel("Returned from setLayerMask.");
                 break;
+            case "convertVectorToShape":
+                logToPanel("Calling convertVectorToShape function...");
+                result = convertVectorToShape(args);
+                logToPanel("Returned from convertVectorToShape.");
+                break;
+            case "runScript":
+                logToPanel("Calling runScript function...");
+                result = runScript(args);
+                logToPanel("Returned from runScript.");
+                break;
             default:
                 result = JSON.stringify({ error: "Unknown command: " + command });
         }
@@ -2116,7 +2208,7 @@ function executeCommand(command, args) {
         try {
             var resultObj = JSON.parse(resultString);
             // Add a timestamp to help identify if we're getting fresh results
-            resultObj._responseTimestamp = new Date().toISOString();
+            resultObj._responseTimestamp = (typeof new Date().toISOString === "function") ? new Date().toISOString() : new Date().toString();
             resultObj._commandExecuted = command;
             resultString = JSON.stringify(resultObj, null, 2);
             logToPanel("Added timestamp to result JSON for tracking freshness.");
@@ -2191,10 +2283,15 @@ function executeCommand(command, args) {
     }
 }
 
+// Path of the command file currently being processed (may be the Documents fallback)
+var activeCommandFilePath = null;
+
 // Update command file status
+// Always writes to the SAME file the command was read from, otherwise a command
+// read from the fallback location stays "pending" and is re-executed forever.
 function updateCommandStatus(status) {
     try {
-        var commandFile = new File(getCommandFilePath());
+        var commandFile = new File(activeCommandFilePath || getCommandFilePath());
         if (commandFile.exists) {
             commandFile.open("r");
             var content = commandFile.read();
@@ -2252,7 +2349,9 @@ function checkForCommands() {
                     
                     // Only execute pending commands
                     if (commandData && commandData.status === "pending") {
-                        logToPanel("Found command: " + commandData.command);
+                        logToPanel("Found command: " + commandData.command + " (" + commandFile.fsName + ")");
+                        // Remember which file this command came from
+                        activeCommandFilePath = commandFile.fsName;
                         // Update status to running
                         updateCommandStatus("running");
                         
